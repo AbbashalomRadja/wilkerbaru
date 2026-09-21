@@ -487,6 +487,32 @@
       margin-top: 6px;
     }
 
+    /* Label permanen nama+kode wilayah di atas polygon (muncul saat difilter) */
+    .wilayah-label {
+      background: rgba(255, 255, 255, .88);
+      border: 1px solid rgba(11, 37, 69, .12);
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(11, 37, 69, .12);
+      padding: 2px 6px;
+      pointer-events: none;
+      font-family: 'Inter', sans-serif;
+      text-align: center;
+      line-height: 1.25;
+    }
+    .wilayah-label::before { display: none; }
+    .lbl-nama {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+    .lbl-kode {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #5B6675;
+      white-space: nowrap;
+    }
+
     #sidebarBackdrop {
       display: none;
     }
@@ -821,6 +847,34 @@
       opacity: 0.5;
       cursor: not-allowed;
     }
+
+    /* ---------- Reset Filter Button ---------- */
+    #resetFilterBtn {
+      display: none;
+      width: 100%;
+      margin-top: 10px;
+      padding: 9px 14px;
+      border: 1.5px solid #E53E3E;
+      border-radius: 9px;
+      background: #FFF5F5;
+      color: #E53E3E;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s ease;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    #resetFilterBtn:hover {
+      background: #FED7D7;
+      border-color: #C53030;
+      color: #C53030;
+    }
+    #resetFilterBtn.show {
+      display: flex;
+    }
   </style>
 </head>
 
@@ -872,6 +926,10 @@
               <option value="">&mdash; Pilih desa dulu &mdash;</option>
             </select>
           </div>
+          <button id="resetFilterBtn" aria-label="Reset semua filter">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+            Reset Semua Filter
+          </button>
         </div>
 
         <div class="block">
@@ -1704,16 +1762,34 @@
         sls: { layer: null, toggleId: 'toggleSls' }
       };
 
+      // Style dasar tiap level, dipakai lagi saat mengembalikan tampilan
+      // polygon yang sebelumnya disembunyikan oleh filter.
+      var BASE_STYLE = {
+        kabkot: { color: '#F5A623', weight: 3, opacity: 1, fillOpacity: 0, dashArray: null },
+        kec: { color: '#3E9DFF', weight: 1.6, opacity: 1, fillOpacity: 0.02 },
+        desa: { color: '#20C997', weight: 1.2, opacity: 1, fillOpacity: 0.04 },
+        sls: { color: '#9333EA', weight: 1, opacity: 0.9, fillOpacity: 0.03, dashArray: '3,3' }
+      };
+      var HIDDEN_STYLE = { stroke: false, fill: false, weight: 0, opacity: 0, fillOpacity: 0 };
+
+      // Tampilkan/sembunyikan satu polygon. Disembunyikan lewat style (bukan
+      // dibuang dari layer group) supaya gampang dikembalikan lagi, dan lewat
+      // pointer-events supaya polygon yang tersembunyi tidak ikut ke-klik/hover.
+      function setFeatureVisible(layer, level, visible) {
+        layer.setStyle(visible ? BASE_STYLE[level] : HIDDEN_STYLE);
+        if (layer._path) layer._path.style.pointerEvents = visible ? '' : 'none';
+      }
+
       var kabkotLayer = L.geoJSON(kabkotData, {
-        style: function () { return { color: '#F5A623', weight: 3, fillOpacity: 0, dashArray: null }; },
+        style: function () { return BASE_STYLE.kabkot; },
         onEachFeature: bindPopup('kabkot')
       });
       var kecLayer = L.geoJSON(kecamatanData, {
-        style: function () { return { color: '#3E9DFF', weight: 1.6, fillOpacity: 0.02 }; },
+        style: function () { return BASE_STYLE.kec; },
         onEachFeature: bindPopup('kec')
       });
       var desaLayer = L.geoJSON(desaData, {
-        style: function () { return { color: '#20C997', weight: 1.2, fillOpacity: 0.04 }; },
+        style: function () { return BASE_STYLE.desa; },
         onEachFeature: bindPopup('desa')
       });
 
@@ -1730,13 +1806,119 @@
       document.getElementById('cnt-desa').textContent = desaData.features.length;
       document.getElementById('cnt-sls').textContent = (typeof slsMeta !== 'undefined' ? slsMeta.length : '-');
 
+      // Filter aktif dari dropdown/pencarian: null berarti "semua" di level itu.
+      // Dipakai applyFilterVisibility() untuk menyembunyikan polygon di luar cakupan,
+      // di SEMUA layer (kabkot/kec/desa/sls) sesuai revisi dari mentor.
+      var activeFilter = { kdkab: null, kdkec: null, kddesa: null };
+
+      // Level yang di-highlight sekarang -> tentukan level ANAK-nya yang perlu diberi label
+      // (sesuai permintaan mentor): difilter sampai desa -> label SLS; difilter sampai
+      // kecamatan -> label desa; difilter sampai kabupaten -> label kecamatan;
+      // tidak ada filter sama sekali -> label kabupaten (level teratas).
+      function labelLevelForFilter() {
+        if (activeFilter.kddesa) return 'sls';
+        if (activeFilter.kdkec) return 'desa';
+        if (activeFilter.kdkab) return 'kec';
+        return null; // belum ada filter dropdown/pencarian -> lihat status zoom (zoomLabelLevel)
+      }
+
+      // Saat user cuma browsing bebas (scroll zoom) tanpa pakai dropdown/pencarian,
+      // level label mengikuti ambang auto-zoom desa/SLS yang sudah ada.
+      function zoomLabelLevel() {
+        var z = map.getZoom();
+        if (z >= SLS_AUTO_ZOOM) return 'sls';
+        if (z >= DESA_AUTO_ZOOM) return 'desa';
+        return null;
+      }
+
+      function labelText(p, level) {
+        var nama = level === 'kabkot' ? p.nmkab : level === 'kec' ? p.nmkec : level === 'desa' ? p.nmdesa : p.nmsls;
+        var kode = level === 'kabkot' ? p.kdkab : level === 'kec' ? p.kdkec : level === 'desa' ? p.kddesa : p.kdsls;
+        return '<div class="lbl-nama">' + escapeHtml(nama) + '</div><div class="lbl-kode">' + escapeHtml(kode) + '</div>';
+      }
+
+      // Pasang/lepas label permanen di satu polygon sesuai kondisi saat ini.
+      function setFeatureLabel(layer, level, shouldLabel) {
+        if (shouldLabel) {
+          var text = labelText(layer.feature.properties, level);
+          if (layer.getTooltip()) { layer.setTooltipContent(text); }
+          else { layer.bindTooltip(text, { permanent: true, direction: 'center', className: 'wilayah-label', opacity: 1 }); }
+          if (!layer.isTooltipOpen()) layer.openTooltip();
+        } else if (layer.getTooltip()) {
+          layer.unbindTooltip();
+        }
+      }
+
+      function clearLabelsOnLayer(layerGroup) {
+        layerGroup.eachLayer(function (l) { if (l.getTooltip()) l.unbindTooltip(); });
+      }
+
+      // Satu fungsi terpusat untuk label, dipanggil baik saat filter dropdown/pencarian
+      // berubah, MAUPUN saat user cuma zoom manual (moveend/zoomend).
+      // - Kalau ada filter aktif (dari dropdown/pencarian): label dipasang ke SEMUA
+      //   fitur yang sedang match filter itu (jumlahnya sudah otomatis sedikit).
+      // - Kalau tidak ada filter (browsing bebas): label dipasang cuma untuk fitur
+      //   yang KELIHATAN DI LAYAR saat ini saja, supaya tidak numpuk/berat.
+      function refreshLabels() {
+        var filterLevel = labelLevelForFilter();
+        var level = filterLevel || zoomLabelLevel();
+        var viewportOnly = !filterLevel;
+
+        // Saat ada filter aktif, pastikan layer anak diaktifkan supaya label bisa muncul
+        // (sesuai permintaan mentor: filter kecamatan -> label desa; filter desa -> label SLS)
+        if (filterLevel === 'desa') forceLayerOn('desa');
+        if (filterLevel === 'sls') forceLayerOn('sls');
+        if (filterLevel === 'kec') forceLayerOn('kec');
+
+        clearLabelsOnLayer(kabkotLayer);
+        clearLabelsOnLayer(kecLayer);
+        clearLabelsOnLayer(desaLayer);
+        slsLayer.eachLayer(function (sub) { clearLabelsOnLayer(sub); });
+
+        if (!level) return;
+
+        var bounds = viewportOnly ? map.getBounds() : null;
+        function maybeLabel(l, lvl) {
+          if (l.options.opacity === 0) return; // sedang disembunyikan oleh filter
+          if (bounds && !bounds.intersects(l.getBounds())) return; // di luar layar -> skip
+          setFeatureLabel(l, lvl, true);
+        }
+
+        if (level === 'kec') kecLayer.eachLayer(function (l) { maybeLabel(l, 'kec'); });
+        else if (level === 'desa') desaLayer.eachLayer(function (l) { maybeLabel(l, 'desa'); });
+        else if (level === 'sls') slsLayer.eachLayer(function (sub) { sub.eachLayer(function (l) { maybeLabel(l, 'sls'); }); });
+      }
+
+      function applyFilterVisibility() {
+        kabkotLayer.eachLayer(function (l) {
+          var show = !activeFilter.kdkab || l.feature.properties.kdkab === activeFilter.kdkab;
+          setFeatureVisible(l, 'kabkot', show);
+        });
+        kecLayer.eachLayer(function (l) {
+          var p = l.feature.properties;
+          var show = (!activeFilter.kdkab || p.kdkab === activeFilter.kdkab) &&
+                     (!activeFilter.kdkec || p.kdkec === activeFilter.kdkec);
+          setFeatureVisible(l, 'kec', show);
+        });
+        desaLayer.eachLayer(function (l) {
+          var p = l.feature.properties;
+          var show = (!activeFilter.kdkab || p.kdkab === activeFilter.kdkab) &&
+                     (!activeFilter.kdkec || p.kdkec === activeFilter.kdkec) &&
+                     (!activeFilter.kddesa || p.kddesa === activeFilter.kddesa);
+          setFeatureVisible(l, 'desa', show);
+        });
+        refreshSlsLayerMembership();
+        refreshLabels();
+        updateResetBtnVisibility();
+      }
+
       /* ---------------- SLS: layer lazy-load per kabupaten ---------------- */
       // Data geometri SLS berat (±6 MB total) sehingga TIDAK di-embed di HTML.
       // Hanya dimuat (fetch) per kabupaten saat benar-benar dibutuhkan:
       // toggle layer manual, pilih dropdown, klik hasil pencarian, GPS, atau zoom sangat dekat.
-      var slsLayer = L.layerGroup();     // wadah gabungan semua sub-layer SLS yang sudah dimuat
+      var slsLayer = L.layerGroup();     // wadah SLS yang SEDANG ditampilkan (bisa dikosongkan/diisi ulang)
       var slsRawData = {};               // kdkab -> { type, features:[...] } (mentah, untuk point-in-polygon)
-      var slsGeoLayers = {};             // kdkab -> L.geoJSON layer
+      var slsGeoLayers = {};             // kdkab -> L.geoJSON layer (cache, tetap disimpan walau lagi disembunyikan)
       var slsLoading = {};               // kdkab -> Promise (mencegah fetch dobel)
       var slsManualOverride = null;      // null = ikut auto-zoom; true/false = dipaksa lewat toggle
       var SLS_AUTO_ZOOM = 13;
@@ -1755,15 +1937,12 @@
           .then(function (geojson) {
             slsRawData[kdkab] = geojson;
             var glayer = L.geoJSON(geojson, {
-              style: function () { return { color: '#9333EA', weight: 1, opacity: 0.9, fillOpacity: 0.03, dashArray: '3,3' }; },
+              style: function () { return BASE_STYLE.sls; },
               onEachFeature: bindPopup('sls')
             });
             slsGeoLayers[kdkab] = glayer;
-            if (map.hasLayer(slsLayer) || slsManualOverride === true) {
-              glayer.addTo(slsLayer);
-            } else {
-              glayer.addTo(slsLayer);
-            }
+            refreshSlsLayerMembership(); // langsung terapkan filter kec/desa yang sedang aktif (kalau ada)
+            refreshLabels();
             kabkotLayer.bringToFront();
             return glayer;
           })
@@ -1774,6 +1953,30 @@
             return null;
           });
         return slsLoading[kdkab];
+      }
+
+      // Tentukan kabupaten mana yang SLS-nya harus tampil, lalu isi ulang slsLayer
+      // hanya dengan kabupaten itu (mencegah SLS kabupaten lain ikut menumpuk saat
+      // user pindah-pindah lokasi/zoom — ini akar masalah "polygon tidak mengikuti filter").
+      function refreshSlsLayerMembership() {
+        slsLayer.clearLayers();
+        var targetKab = activeFilter.kdkab;
+        if (!targetKab) {
+          // Tidak ada filter kabupaten eksplisit -> ikuti kabupaten yang sedang
+          // ada di tengah layar (satu kabupaten pada satu waktu, tidak ditumpuk).
+          var c = map.getCenter();
+          var kb = findKabByCoords(c.lat, c.lng);
+          targetKab = kb ? kb.properties.kdkab : null;
+        }
+        if (!targetKab || !slsGeoLayers[targetKab]) return;
+        var glayer = slsGeoLayers[targetKab];
+        glayer.eachLayer(function (l) {
+          var p = l.feature.properties;
+          var show = (!activeFilter.kdkec || p.kdkec === activeFilter.kdkec) &&
+                     (!activeFilter.kddesa || p.kddesa === activeFilter.kddesa);
+          setFeatureVisible(l, 'sls', show);
+        });
+        slsLayer.addLayer(glayer);
       }
 
       layerRefs.sls.layer = slsLayer;
@@ -1793,9 +1996,11 @@
       map.on('zoomend', function () {
         if (desaManualOverride === null) applyDesaVisibility();
         maybeAutoLoadSls();
+        refreshLabels();
       });
       map.on('moveend', function () {
         maybeAutoLoadSls();
+        refreshLabels();
       });
       applyDesaVisibility();
 
@@ -1812,10 +2017,14 @@
         var shouldShow = slsManualOverride !== null ? slsManualOverride : (map.getZoom() >= SLS_AUTO_ZOOM);
         applySlsVisibility();
         if (!shouldShow) return;
-        // Deteksi kabupaten yang sedang berada di tengah viewport, lalu muat SLS-nya saja (hemat kuota).
-        var c = map.getCenter();
-        var kb = findKabByCoords(c.lat, c.lng);
-        if (kb) loadSlsForKab(kb.properties.kdkab);
+        // Kabupaten mana yang dimuat mengikuti filter kalau ada, atau posisi tengah layar kalau tidak ada.
+        var kdkab = activeFilter.kdkab;
+        if (!kdkab) {
+          var c = map.getCenter();
+          var kb = findKabByCoords(c.lat, c.lng);
+          kdkab = kb ? kb.properties.kdkab : null;
+        }
+        if (kdkab) loadSlsForKab(kdkab).then(function () { refreshSlsLayerMembership(); refreshLabels(); });
       }
 
       function findKabByCoords(lat, lng) {
@@ -1846,10 +2055,13 @@
         slsManualOverride = e.target.checked;
         if (e.target.checked) {
           slsLayer.addTo(map);
-          // Muat SLS kabupaten yang sedang tampak di layar saat toggle dinyalakan manual.
-          var c = map.getCenter();
-          var kb = findKabByCoords(c.lat, c.lng);
-          if (kb) loadSlsForKab(kb.properties.kdkab);
+          var kdkab = activeFilter.kdkab;
+          if (!kdkab) {
+            var c = map.getCenter();
+            var kb = findKabByCoords(c.lat, c.lng);
+            kdkab = kb ? kb.properties.kdkab : null;
+          }
+          if (kdkab) loadSlsForKab(kdkab).then(refreshSlsLayerMembership);
         } else {
           map.removeLayer(slsLayer);
         }
@@ -1869,6 +2081,46 @@
           o.value = f.properties.kdkab; o.textContent = f.properties.nmkab;
           selKabkot.appendChild(o);
         });
+
+      // Fungsi pengisi dropdown dipisah dari event handler supaya bisa dipanggil
+      // ulang dari hasil pencarian (search) tanpa memicu event 'change' dobel.
+      function populateKecOptions(kdkab) {
+        selKec.innerHTML = '<option value="">&mdash; Semua kecamatan &mdash;</option>';
+        if (!kdkab) { selKec.disabled = true; return; }
+        selKec.disabled = false;
+        kecamatanData.features.filter(function (f) { return f.properties.kdkab === kdkab; })
+          .sort(function (a, b) { return a.properties.nmkec.localeCompare(b.properties.nmkec); })
+          .forEach(function (f) {
+            var o = document.createElement('option');
+            o.value = f.properties.kdkec; o.textContent = f.properties.nmkec;
+            selKec.appendChild(o);
+          });
+      }
+      function populateDesaOptions(kdkab, kdkec) {
+        selDesa.innerHTML = '<option value="">&mdash; Semua desa &mdash;</option>';
+        if (!kdkec) { selDesa.disabled = true; return; }
+        selDesa.disabled = false;
+        desaData.features.filter(function (f) { return f.properties.kdkab === kdkab && f.properties.kdkec === kdkec; })
+          .sort(function (a, b) { return a.properties.nmdesa.localeCompare(b.properties.nmdesa); })
+          .forEach(function (f) {
+            var o = document.createElement('option');
+            o.value = f.properties.kddesa; o.textContent = f.properties.nmdesa;
+            selDesa.appendChild(o);
+          });
+      }
+      function populateSlsOptions(kdkab, kdkec, kddesa) {
+        selSls.innerHTML = '<option value="">&mdash; Semua SLS &mdash;</option>';
+        if (!kddesa) { selSls.disabled = true; return; }
+        selSls.disabled = false;
+        (typeof slsMeta !== 'undefined' ? slsMeta : [])
+          .filter(function (p) { return p.kdkab === kdkab && p.kdkec === kdkec && p.kddesa === kddesa; })
+          .sort(function (a, b) { return a.nmsls.localeCompare(b.nmsls); })
+          .forEach(function (p) {
+            var o = document.createElement('option');
+            o.value = p.kdsls; o.textContent = p.nmsls;
+            selSls.appendChild(o);
+          });
+      }
 
       function layerByKode(layerGroup, matchFn) {
         var out = null;
@@ -1896,10 +2148,56 @@
         if (window.innerWidth <= 760) closeSidebar();
       }
 
+      function resetToFullView() {
+        map.fitBounds(kabkotLayer.getBounds(), { padding: [30, 30] });
+        var infoPanel = document.getElementById('infoPanel');
+        infoPanel.classList.add('empty');
+        infoPanel.innerHTML = 'Klik salah satu wilayah pada peta, atau gunakan pencarian, untuk melihat\r\n            detail kode wilkerstat-nya di sini.';
+      }
+
+      /* --- Reset Filter Button --- */
+      var resetFilterBtn = document.getElementById('resetFilterBtn');
+
+      function updateResetBtnVisibility() {
+        var hasFilter = activeFilter.kdkab || activeFilter.kdkec || activeFilter.kddesa;
+        if (hasFilter) resetFilterBtn.classList.add('show');
+        else resetFilterBtn.classList.remove('show');
+      }
+
+      function resetAllFilters() {
+        // Reset dropdown ke default
+        selKabkot.value = '';
+        selKec.innerHTML = '<option value="">&mdash; Pilih kab/kota dulu &mdash;</option>';
+        selKec.disabled = true;
+        selDesa.innerHTML = '<option value="">&mdash; Pilih kecamatan dulu &mdash;</option>';
+        selDesa.disabled = true;
+        selSls.innerHTML = '<option value="">&mdash; Pilih desa dulu &mdash;</option>';
+        selSls.disabled = true;
+
+        // Reset search box
+        searchBox.value = '';
+        searchResults.style.display = 'none';
+        searchResults.innerHTML = '';
+
+        // Kosongkan filter
+        activeFilter.kdkab = null;
+        activeFilter.kdkec = null;
+        activeFilter.kddesa = null;
+
+        // Kembalikan visibility semua polygon
+        applyFilterVisibility();
+
+        // Zoom ke tampilan full Kaltara
+        resetToFullView();
+      }
+
+      resetFilterBtn.addEventListener('click', resetAllFilters);
+
       // Cari layer SLS berdasarkan properti, memuat data kabupatennya dulu jika perlu.
       function findSlsLayerAndOpen(kdkab, matchFn, props) {
         loadSlsForKab(kdkab).then(function (glayer) {
           if (!glayer) return;
+          refreshSlsLayerMembership();
           var l = layerByKode(glayer, matchFn);
           if (l) zoomAndOpen(l, 'sls', props || l.feature.properties);
         });
@@ -1907,22 +2205,18 @@
 
       selKabkot.addEventListener('change', function () {
         var kdkab = selKabkot.value;
-        selKec.innerHTML = '<option value="">&mdash; Semua kecamatan &mdash;</option>';
+        populateKecOptions(kdkab);
         selDesa.innerHTML = '<option value="">&mdash; Pilih kecamatan dulu &mdash;</option>';
         selDesa.disabled = true;
         selSls.innerHTML = '<option value="">&mdash; Pilih desa dulu &mdash;</option>';
         selSls.disabled = true;
 
-        if (!kdkab) { selKec.disabled = true; return; }
-        selKec.disabled = false;
+        activeFilter.kdkab = kdkab || null;
+        activeFilter.kdkec = null;
+        activeFilter.kddesa = null;
+        applyFilterVisibility();
 
-        var list = kecamatanData.features.filter(function (f) { return f.properties.kdkab === kdkab; })
-          .sort(function (a, b) { return a.properties.nmkec.localeCompare(b.properties.nmkec); });
-        list.forEach(function (f) {
-          var o = document.createElement('option');
-          o.value = f.properties.kdkec; o.textContent = f.properties.nmkec;
-          selKec.appendChild(o);
-        });
+        if (!kdkab) { resetToFullView(); return; }
 
         var l = layerByKode(kabkotLayer, function (p) { return p.kdkab === kdkab; });
         if (l) zoomAndOpen(l, 'kabkot', l.feature.properties);
@@ -1930,19 +2224,19 @@
 
       selKec.addEventListener('change', function () {
         var kdkab = selKabkot.value, kdkec = selKec.value;
-        selDesa.innerHTML = '<option value="">&mdash; Semua desa &mdash;</option>';
+        populateDesaOptions(kdkab, kdkec);
         selSls.innerHTML = '<option value="">&mdash; Pilih desa dulu &mdash;</option>';
         selSls.disabled = true;
-        if (!kdkec) { selDesa.disabled = true; return; }
-        selDesa.disabled = false;
 
-        var list = desaData.features.filter(function (f) { return f.properties.kdkab === kdkab && f.properties.kdkec === kdkec; })
-          .sort(function (a, b) { return a.properties.nmdesa.localeCompare(b.properties.nmdesa); });
-        list.forEach(function (f) {
-          var o = document.createElement('option');
-          o.value = f.properties.kddesa; o.textContent = f.properties.nmdesa;
-          selDesa.appendChild(o);
-        });
+        activeFilter.kdkec = kdkec || null;
+        activeFilter.kddesa = null;
+        applyFilterVisibility();
+
+        if (!kdkec) {
+          var kl = layerByKode(kabkotLayer, function (p) { return p.kdkab === kdkab; });
+          if (kl) zoomAndOpen(kl, 'kabkot', kl.feature.properties);
+          return;
+        }
 
         var l = layerByKode(kecLayer, function (p) { return p.kdkab === kdkab && p.kdkec === kdkec; });
         if (l) zoomAndOpen(l, 'kec', l.feature.properties);
@@ -1950,18 +2244,16 @@
 
       selDesa.addEventListener('change', function () {
         var kdkab = selKabkot.value, kdkec = selKec.value, kddesa = selDesa.value;
-        selSls.innerHTML = '<option value="">&mdash; Semua SLS &mdash;</option>';
-        if (!kddesa) { selSls.disabled = true; return; }
-        selSls.disabled = false;
+        populateSlsOptions(kdkab, kdkec, kddesa);
 
-        var slsList = (typeof slsMeta !== 'undefined' ? slsMeta : [])
-          .filter(function (p) { return p.kdkab === kdkab && p.kdkec === kdkec && p.kddesa === kddesa; })
-          .sort(function (a, b) { return a.nmsls.localeCompare(b.nmsls); });
-        slsList.forEach(function (p) {
-          var o = document.createElement('option');
-          o.value = p.kdsls; o.textContent = p.nmsls;
-          selSls.appendChild(o);
-        });
+        activeFilter.kddesa = kddesa || null;
+        applyFilterVisibility();
+
+        if (!kddesa) {
+          var kl = layerByKode(kecLayer, function (p) { return p.kdkab === kdkab && p.kdkec === kdkec; });
+          if (kl) zoomAndOpen(kl, 'kec', kl.feature.properties);
+          return;
+        }
 
         var l = layerByKode(desaLayer, function (p) { return p.kdkab === kdkab && p.kdkec === kdkec && p.kddesa === kddesa; });
         if (l) zoomAndOpen(l, 'desa', l.feature.properties);
@@ -1969,7 +2261,11 @@
 
       selSls.addEventListener('change', function () {
         var kdkab = selKabkot.value, kdkec = selKec.value, kddesa = selDesa.value, kdsls = selSls.value;
-        if (!kdsls) return;
+        if (!kdsls) {
+          var l = layerByKode(desaLayer, function (p) { return p.kdkab === kdkab && p.kdkec === kdkec && p.kddesa === kddesa; });
+          if (l) zoomAndOpen(l, 'desa', l.feature.properties);
+          return;
+        }
         var props = (typeof slsMeta !== 'undefined' ? slsMeta : []).find(function (p) {
           return p.kdkab === kdkab && p.kdkec === kdkec && p.kddesa === kddesa && p.kdsls === kdsls;
         });
@@ -2047,15 +2343,53 @@
         searchResults.querySelectorAll('div[data-idx]').forEach(function (el) {
           el.addEventListener('click', function () {
             var it = matches[+el.dataset.idx];
-            if (it.level === 'sls') {
-              findSlsLayerAndOpen(it.props.kdkab, function (p) {
-                return p === it.props || (p.kdkab === it.props.kdkab && p.kdkec === it.props.kdkec && p.kddesa === it.props.kddesa && p.kdsls === it.props.kdsls);
-              }, it.props);
-            } else {
-              var layerGroup = it.level === 'kabkot' ? kabkotLayer : (it.level === 'kec' ? kecLayer : desaLayer);
-              var l = layerByKode(layerGroup, function (p) { return p === it.props || (p.kdkab === it.props.kdkab && p.kdkec === it.props.kdkec && p.kddesa === it.props.kddesa && p.kdprov === it.props.kdprov); });
-              if (l) { zoomAndOpen(l, it.level, it.props); }
+            var p = it.props;
+
+            if (it.level === 'kabkot') {
+              selKabkot.value = p.kdkab;
+              populateKecOptions(p.kdkab);
+              selDesa.innerHTML = '<option value="">&mdash; Pilih kecamatan dulu &mdash;</option>'; selDesa.disabled = true;
+              selSls.innerHTML = '<option value="">&mdash; Pilih desa dulu &mdash;</option>'; selSls.disabled = true;
+              activeFilter.kdkab = p.kdkab; activeFilter.kdkec = null; activeFilter.kddesa = null;
+              applyFilterVisibility();
+              var l = layerByKode(kabkotLayer, function (pp) { return pp.kdkab === p.kdkab; });
+              if (l) zoomAndOpen(l, 'kabkot', l.feature.properties);
+            } else if (it.level === 'kec') {
+              selKabkot.value = p.kdkab;
+              populateKecOptions(p.kdkab);
+              selKec.value = p.kdkec;
+              populateDesaOptions(p.kdkab, p.kdkec);
+              selSls.innerHTML = '<option value="">&mdash; Pilih desa dulu &mdash;</option>'; selSls.disabled = true;
+              activeFilter.kdkab = p.kdkab; activeFilter.kdkec = p.kdkec; activeFilter.kddesa = null;
+              applyFilterVisibility();
+              var l = layerByKode(kecLayer, function (pp) { return pp.kdkab === p.kdkab && pp.kdkec === p.kdkec; });
+              if (l) zoomAndOpen(l, 'kec', l.feature.properties);
+            } else if (it.level === 'desa') {
+              selKabkot.value = p.kdkab;
+              populateKecOptions(p.kdkab);
+              selKec.value = p.kdkec;
+              populateDesaOptions(p.kdkab, p.kdkec);
+              selDesa.value = p.kddesa;
+              populateSlsOptions(p.kdkab, p.kdkec, p.kddesa);
+              activeFilter.kdkab = p.kdkab; activeFilter.kdkec = p.kdkec; activeFilter.kddesa = p.kddesa;
+              applyFilterVisibility();
+              var l = layerByKode(desaLayer, function (pp) { return pp.kdkab === p.kdkab && pp.kdkec === p.kdkec && pp.kddesa === p.kddesa; });
+              if (l) zoomAndOpen(l, 'desa', l.feature.properties);
+            } else if (it.level === 'sls') {
+              selKabkot.value = p.kdkab;
+              populateKecOptions(p.kdkab);
+              selKec.value = p.kdkec;
+              populateDesaOptions(p.kdkab, p.kdkec);
+              selDesa.value = p.kddesa;
+              populateSlsOptions(p.kdkab, p.kdkec, p.kddesa);
+              selSls.value = p.kdsls;
+              activeFilter.kdkab = p.kdkab; activeFilter.kdkec = p.kdkec; activeFilter.kddesa = p.kddesa;
+              applyFilterVisibility();
+              findSlsLayerAndOpen(p.kdkab, function (pp) {
+                return pp === p || (pp.kdkab === p.kdkab && pp.kdkec === p.kdkec && pp.kddesa === p.kddesa && pp.kdsls === p.kdsls);
+              }, p);
             }
+
             searchResults.style.display = 'none';
             searchBox.value = it.name;
           });
